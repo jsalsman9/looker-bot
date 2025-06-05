@@ -1,104 +1,120 @@
-import openai
 import os
-from openai import OpenAI
+import json
 import pandas as pd
+import streamlit as st
+from openai import OpenAI
 from gsheet_helper import load_sheet_data
 from dotenv import load_dotenv
-import streamlit as st
-import json
 
 load_dotenv()
-
 api_key = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=api_key)
+
+
+def get_analysis_plan(question: str):
+    prompt = f"""
+You are a data planning assistant.
+
+Your job is to convert user analysis questions into a JSON plan describing:
+- any filters to apply (like dates, categories),
+- columns to group by,
+- and what metric to aggregate (e.g., sum, mean).
+
+Only respond with a JSON array of steps. Do NOT include any text before or after.
+
+Supported operations:
+- filter_column, operation, value
+- group_by
+- agg_column, agg_func
+
+Example input: "What campaigns performed best this year?"
+Example output:
+[
+  {{"filter_column": "date", "operation": "contains", "value": "2024"}},
+  {{"group_by": "campaign"}},
+  {{"agg_column": "conversions", "agg_func": "sum"}}
+]
+
+Now process this user question:
+"{question}"
+"""
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0
+    )
+    return response.choices[0].message.content.strip()
+
 
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
     if df.empty:
-        return "Could not load data from the sheet."
+        return "❌ Could not load data from the sheet."
 
-    # 1. Let GPT plan the transformation
-    planning_prompt = f"""
-    You are a data analysis planner. Based on the user's question below, return a JSON with:
-    - filters: any filters needed (e.g., date column must be in 2025)
-    - group_by: column(s) to group by
-    - metrics: list of metric(s) to compute (e.g., count, mean, sum of column X)
-    - sort_by: column to sort results by
-    - sort_order: asc or desc
-    Only return valid JSON.
-
-    User question: "{question}"
-    Available columns: {list(df.columns)}
-    """
-
-    plan_response = client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "system", "content": planning_prompt}],
-        temperature=0.3
-    )
+    # Get GPT-generated analysis plan
+    plan = get_analysis_plan(question)
+    st.write("🧠 GPT plan (raw):", plan)
 
     try:
-        plan = json.loads(plan_response.choices[0].message.content)
-    except Exception as e:
-        return f"Failed to parse GPT planning response: {e}"
+        instructions = json.loads(plan)
+        if not instructions or not isinstance(instructions, list):
+            return "❌ GPT returned an empty or invalid analysis plan."
+    except json.JSONDecodeError:
+        return "❌ Failed to parse GPT plan as JSON."
 
-    # 2. Execute the plan in pandas
+    # Apply instructions to the DataFrame
     try:
-        df_exec = df.copy()
+        working_df = df.copy()
 
-        # Apply filters
-        for f in plan.get("filters", []):
-            # Very basic logic for now
-            if "year" in f.lower():
-                date_cols = [col for col in df.columns if "date" in col.lower()]
-                if date_cols:
-                    df_exec[date_cols[0]] = pd.to_datetime(df_exec[date_cols[0]], errors='coerce')
-                    df_exec = df_exec[df_exec[date_cols[0]].dt.year == 2025]
+        for step in instructions:
+            if "filter_column" in step:
+                col = step["filter_column"]
+                op = step["operation"]
+                val = step["value"]
 
-        # Group and aggregate
-        group_cols = plan.get("group_by", [])
-        metrics = plan.get("metrics", [])
+                if op == "equals":
+                    working_df = working_df[working_df[col] == val]
+                elif op == "contains":
+                    working_df = working_df[working_df[col].astype(str).str.contains(val)]
+                elif op == "greater_than":
+                    working_df = working_df[pd.to_numeric(working_df[col], errors='coerce') > float(val)]
+                elif op == "less_than":
+                    working_df = working_df[pd.to_numeric(working_df[col], errors='coerce') < float(val)]
 
-        agg_dict = {}
-        for metric in metrics:
-            if "sum(" in metric:
-                col = metric.split("sum(")[-1].rstrip(")")
-                agg_dict[col] = "sum"
-            elif "mean(" in metric:
-                col = metric.split("mean(")[-1].rstrip(")")
-                agg_dict[col] = "mean"
-            elif "count(" in metric:
-                col = metric.split("count(")[-1].rstrip(")")
-                agg_dict[col] = "count"
+            elif "group_by" in step:
+                group_col = step["group_by"]
+                working_df = working_df.groupby(group_col, dropna=False)
 
-        df_summary = df_exec.groupby(group_cols).agg(agg_dict).reset_index()
+            elif "agg_column" in step:
+                agg_col = step["agg_column"]
+                agg_func = step["agg_func"]
+                if isinstance(working_df, pd.core.groupby.generic.DataFrameGroupBy):
+                    working_df = working_df[agg_col].agg(agg_func).reset_index()
+                else:
+                    working_df = working_df[[agg_col]].agg(agg_func).to_frame().T
 
-        sort_col = plan.get("sort_by")
-        if sort_col in df_summary.columns:
-            df_summary = df_summary.sort_values(sort_col, ascending=plan.get("sort_order", "desc") == "asc")
+        if working_df.empty:
+            return "❌ No data matched the criteria."
 
-        sample_text = df_summary.head(10).to_string(index=False)
+        # Ask GPT to explain the resulting table
+        explanation_prompt = f"""
+You are a helpful data analyst. A user asked this question:
+
+{question}
+
+Here is a summary table computed from a Google Sheet:
+
+{working_df.head(20).to_string(index=False)}
+
+Please provide a clear explanation of what this data shows.
+"""
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": explanation_prompt}],
+            temperature=0.5
+        )
+
+        return response.choices[0].message.content.strip()
 
     except Exception as e:
-        return f"Failed to execute plan: {e}"
-
-    # 3. Let GPT explain the results
-    explanation_prompt = f"""
-    You are a data analyst.
-
-    The user asked: {question}
-
-    Here is the result:
-
-    {sample_text}
-
-    Please explain the findings in clear English.
-    """
-
-    explanation_response = client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "system", "content": explanation_prompt}],
-        temperature=0.4
-    )
-
-    return explanation_response.choices[0].message.content
+        return f"❌ Failed to execute plan: {e}"
