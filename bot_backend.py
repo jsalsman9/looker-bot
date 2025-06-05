@@ -1,15 +1,24 @@
 import os
 import json
 import pandas as pd
-import streamlit as st
 from openai import OpenAI
-from gsheet_helper import load_sheet_data
 from dotenv import load_dotenv
+import streamlit as st
+from difflib import get_close_matches
+from gsheet_helper import load_sheet_data
 
 load_dotenv()
-api_key = st.secrets["OPENAI_API_KEY"]
+
+# Authenticate OpenAI client
+api_key = os.getenv("OPENAI_API_KEY") or st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=api_key)
 
+def match_column(name, columns, cutoff=0.6):
+    """Fuzzy match a column name from a list of columns."""
+    name = name.lower().strip()
+    lowered = {col.lower(): col for col in columns}
+    matches = get_close_matches(name, lowered.keys(), n=1, cutoff=cutoff)
+    return lowered[matches[0]] if matches else None
 
 def get_analysis_plan(question: str):
     prompt = f"""
@@ -45,13 +54,11 @@ Now process this user question:
     )
     return response.choices[0].message.content.strip()
 
-
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
     if df.empty:
-        return "❌ Could not load data from the sheet."
+        return "Could not load data from the sheet."
 
-    # Get GPT-generated analysis plan
     plan = get_analysis_plan(question)
     st.write("🧠 GPT plan (raw):", plan)
 
@@ -62,59 +69,64 @@ def analyze_question(question: str, sheet_url: str):
     except json.JSONDecodeError:
         return "❌ Failed to parse GPT plan as JSON."
 
-    # Apply instructions to the DataFrame
-    try:
-        working_df = df.copy()
+    working_df = df.copy()
 
+    try:
         for step in instructions:
             if "filter_column" in step:
-                col = step["filter_column"]
+                col = match_column(step["filter_column"], df.columns)
+                if col is None:
+                    return f"❌ Column '{step['filter_column']}' not found in sheet."
+
                 op = step["operation"]
                 val = step["value"]
 
                 if op == "equals":
                     working_df = working_df[working_df[col] == val]
                 elif op == "contains":
-                    working_df = working_df[working_df[col].astype(str).str.contains(val)]
+                    working_df = working_df[working_df[col].astype(str).str.contains(str(val), case=False, na=False)]
                 elif op == "greater_than":
                     working_df = working_df[pd.to_numeric(working_df[col], errors='coerce') > float(val)]
                 elif op == "less_than":
                     working_df = working_df[pd.to_numeric(working_df[col], errors='coerce') < float(val)]
 
             elif "group_by" in step:
-                group_col = step["group_by"]
-                working_df = working_df.groupby(group_col, dropna=False)
+                group_col = match_column(step["group_by"], df.columns)
+                if group_col is None:
+                    return f"❌ Column '{step['group_by']}' not found."
+                working_df = working_df.groupby(group_col)
 
             elif "agg_column" in step:
-                agg_col = step["agg_column"]
+                agg_col = match_column(step["agg_column"], df.columns)
+                if agg_col is None:
+                    return f"❌ Column '{step['agg_column']}' not found."
                 agg_func = step["agg_func"]
+
                 if isinstance(working_df, pd.core.groupby.generic.DataFrameGroupBy):
-                    working_df = working_df[agg_col].agg(agg_func).reset_index()
+                    result = working_df[agg_col].agg(agg_func).reset_index()
+                    if agg_col in result.columns and agg_col in [step.get("group_by") for step in instructions]:
+                        result = result.rename(columns={agg_col: f"{agg_func}_{agg_col}"})
+                    working_df = result
                 else:
-                    working_df = working_df[[agg_col]].agg(agg_func).to_frame().T
+                    result = working_df[[agg_col]].agg(agg_func).to_frame().T
+                    result.columns = [f"{agg_func}_{agg_col}"]
+                    working_df = result
 
-        if working_df.empty:
-            return "❌ No data matched the criteria."
+        result_sample = working_df.head(10).to_string(index=False)
 
-        # Ask GPT to explain the resulting table
-        explanation_prompt = f"""
-You are a helpful data analyst. A user asked this question:
+        final_prompt = f"""
+You are a data analyst. Here is a table:
 
-{question}
+{result_sample}
 
-Here is a summary table computed from a Google Sheet:
-
-{working_df.head(20).to_string(index=False)}
-
-Please provide a clear explanation of what this data shows.
+Explain the result of the user's question: "{question}"
 """
         response = client.chat.completions.create(
             model="gpt-4",
-            messages=[{"role": "user", "content": explanation_prompt}],
-            temperature=0.5
+            messages=[{"role": "user", "content": final_prompt}],
+            temperature=0.3
         )
-
-        return response.choices[0].message.content.strip()
+        return response.choices[0].message.content
 
     except Exception as e:
         return f"❌ Failed to execute plan: {e}"
