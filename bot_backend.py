@@ -7,8 +7,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 import streamlit as st
-api_key = os.getenv("OPENAI_API_KEY") or st.secrets["OPENAI_API_KEY"]
+api_key = st.secrets["OPENAI_API_KEY"]  # Use only secrets on Streamlit Cloud
 client = OpenAI(api_key=api_key)
+
 
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
