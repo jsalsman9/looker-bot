@@ -27,109 +27,88 @@ data_dictionary = {
     
 }
 
-def match_column(name, columns, cutoff=0.6):
-    name = name.lower().strip()
-    lowered = {col.lower(): col for col in columns}
-    matches = get_close_matches(name, lowered.keys(), n=1, cutoff=cutoff)
-    return lowered[matches[0]] if matches else None
+kpi_guide = """
+When asked which campaign is "performing the best", consider metrics like:
+- Conversions (higher is better)
+- Click-through rate (CTR = Clicks / Impressions)
+- Cost per acquisition (CPA = Spend / Conversions, lower is better)
+- Return on ad spend (ROAS = Revenue / Spend)
+
+Choose a metric based on what is available in the data. If multiple apply, pick the most meaningful one and explain why.
+"""
+
+def fuzzy_match_column(requested_col, actual_cols):
+    matches = difflib.get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
+    return matches[0] if matches else requested_col
+
+def apply_plan(df, plan):
+    for step in plan:
+        if "filter" in step:
+            col = fuzzy_match_column(step["filter"]["column"], df.columns)
+            val = step["filter"]["value"]
+            df = df[df[col] == val]
+
+        elif "group_by" in step:
+            col = fuzzy_match_column(step["group_by"], df.columns)
+            df = df.groupby(col, as_index=False).first()  # fallback, will be replaced by agg
+
+        elif "agg_column" in step:
+            agg_col = fuzzy_match_column(step["agg_column"], df.columns)
+            agg_func = step.get("agg_func", "sum")
+            group_col = df.columns[0] if df.columns[0] != agg_col else df.columns[1]
+            df = df.groupby(group_col, as_index=False).agg({agg_col: agg_func})
+
+        elif "derive_column" in step:
+            new_col = step["derive_column"]
+            formula = step["formula"]
+            try:
+                df.eval(f"{new_col} = {formula}", inplace=True)
+            except Exception as e:
+                raise ValueError(f"Failed to compute derived column {new_col}: {e}")
+
+        elif "sort_by" in step:
+            sort_col = fuzzy_match_column(step["sort_by"], df.columns)
+            order = step.get("sort_order", "desc") == "desc"
+            df = df.sort_values(by=sort_col, ascending=not order)
+
+        elif "limit" in step:
+            df = df.head(step["limit"])
+
+    return df
 
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
     if df.empty:
-        return "❌ Could not load data from the sheet."
+        return "Could not load data from the sheet."
 
     dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items()])
     system_prompt = f"""
-You are a data analyst working with a dataset from Google Sheets.
+You are a data planner. Given a user question and the dataset description, return a JSON list of steps to answer it.
 
-The dataset has the following columns:
+Data dictionary:
 {dictionary_text}
 
-Here are the first few rows of data:
+Example data:
 {df.head(5).to_string(index=False)}
 
-The user will ask questions about trends, outliers, comparisons, or summaries. Use the column descriptions to infer intent and return a structured JSON plan. Your plan can include:
+{kpi_guide}
 
-- filter_column, filter_op, filter_value
-- group_by
-- agg_column, agg_func (like sum, mean, count)
-
-Respond with a JSON list of steps.
+Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
 """
 
+    plan_response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ],
+        temperature=0.3
+    )
+
     try:
-        plan_response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question}
-            ],
-            temperature=0.2
-        )
-        plan_json = plan_response.choices[0].message.content
-        st.write("🧠 GPT plan (raw):", plan_json)
-        instructions = json.loads(plan_json)
-    except Exception as e:
-        return f"❌ Failed to generate plan: {e}"
-
-    working_df = df.copy()
-    try:
-        for step in instructions:
-            if "filter_column" in step:
-                col = match_column(step["filter_column"], df.columns)
-                if col is None:
-                    return f"❌ Column '{step['filter_column']}' not found."
-                op = step.get("filter_op", "==")
-                val = step["filter_value"]
-
-                if op == "==":
-                    working_df = working_df[working_df[col] == val]
-                elif op == ">=":
-                    working_df = working_df[working_df[col] >= val]
-                elif op == "<":
-                    working_df = working_df[working_df[col] < val]
-
-            elif "group_by" in step:
-                group_col = match_column(step["group_by"], df.columns)
-                if group_col is None:
-                    return f"❌ Column '{step['group_by']}' not found."
-                working_df = working_df.groupby(group_col)
-
-            elif "agg_column" in step:
-                agg_col = match_column(step["agg_column"], df.columns)
-                if agg_col is None:
-                    return f"❌ Column '{step['agg_column']}' not found."
-                agg_func = step["agg_func"]
-
-                if isinstance(working_df, pd.core.groupby.generic.DataFrameGroupBy):
-                    result = working_df[agg_col].agg(agg_func).reset_index()
-                    if agg_col in result.columns and agg_col in [step.get("group_by") for step in instructions]:
-                        result = result.rename(columns={agg_col: f"{agg_func}_{agg_col}"})
-                    working_df = result
-                else:
-                    result = working_df[[agg_col]].agg(agg_func).to_frame().T
-                    result.columns = [f"{agg_func}_{agg_col}"]
-                    working_df = result
-
+        plan = json.loads(plan_response.choices[0].message.content)
+        df_result = apply_plan(df, plan)
     except Exception as e:
         return f"❌ Failed to execute plan: {e}"
 
-    try:
-        answer_prompt = f"""
-Given the user question: "{question}"
-and the resulting data:
-{working_df.to_string(index=False)}
-
-Write a helpful summary of the result.
-"""
-        answer = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You summarize data results clearly."},
-                {"role": "user", "content": answer_prompt}
-            ],
-            temperature=0.4
-        )
-        return answer.choices[0].message.content
-    except Exception as e:
-        return f"✅ Data computed, but failed to summarize: {e}"
+    return df_result.to_markdown(index=False) if not df_result.empty else "No results found."
