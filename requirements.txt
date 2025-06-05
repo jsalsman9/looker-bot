@@ -3,3 +3,4 @@ openai
 pandas
 gspread
 google-auth
+python-dotenv
