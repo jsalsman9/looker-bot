@@ -13,3 +13,4 @@ if st.button("Ask") and sheet_url and question:
     with st.spinner("Thinking..."):
         response = analyze_question(question, sheet_url)
         st.markdown(f"**Answer:** {response}")
+# trigger redeploy
