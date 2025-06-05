@@ -2,7 +2,7 @@ import streamlit as st
 from bot_backend import analyze_question
 
 import streamlit as st
-st.write("✅ Secrets loaded:", "OPENAI_API_KEY" in st.secrets)
+#st.write("✅ Secrets loaded:", "OPENAI_API_KEY" in st.secrets)
 
 st.title("Looker Chatbot!")
 
