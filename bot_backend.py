@@ -4,39 +4,43 @@ import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
-import difflib
+from difflib import get_close_matches
 import json
-import time
 
 load_dotenv()
+
 api_key = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=api_key)
 
 data_dictionary = {
-    "Campaign": "The marketing campaign name...",
+    "Campaign": "The marketing campaign name. This is lengthy and will contain codes and other alpha numerics",
     "Clicks": "Number of times the ad was clicked",
     "Impressions": "Number of times the ad was shown",
     "Media Cost": "Total ad spend in USD",
     "Date": "The date the ad was served (YYYY-MM-DD)",
     "Total Conversions": "Number of desired outcomes (e.g., signups, purchases)",
-    "advertiser": "The client this table belongs to",
-    "Activity ID": "Unique identifier, not important for analysis",
-    "Placement": "Where the ad was placed",
-    "Video Plays": "Number of video plays",
-    "video_completions": "Video completions"
+    "advertiser": "The client that this table belongs to. Will be the same value",
+    "Activity ID": "Unique identifier for certain activities. Not all activities will have a set ID. Will not be important for analysis",
+    "Placement": "Where this ad was placed. This is a very specific and long alpha numeric that contains where the ad was place, what type of ad was placed, and even the layout size of the ad",
+    "Video Plays": "The amount of times a video was played for that ad",
+    "video_completions": "The amount of times a user has completed a ad video in it's entirety"
 }
 
 kpi_guide = """
-When asked which campaign is "performing the best", consider:
-- Conversions (higher = better)
-- CTR = Clicks / Impressions
-- CPA = Spend / Conversions (lower = better)
-- ROAS = Revenue / Spend
-Pick the best available metric.
+When asked which campaign is "performing the best", consider metrics like:
+- Conversions (higher is better)
+- Click-through rate (CTR = Clicks / Impressions)
+- Cost per acquisition (CPA = Spend / Conversions, lower is better)
+- Return on ad spend (ROAS = Revenue / Spend)
+
+Choose a metric based on what is available in the data. If multiple apply, pick the most meaningful one and explain why.
+Always include a derive_column step to compute the metric.
+Exclude rows with 0 Impressions or Conversions.
+Include a sort_by and limit step to rank the results.
 """
 
 def fuzzy_match_column(requested_col, actual_cols):
-    matches = difflib.get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
+    matches = get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
     return matches[0] if matches else requested_col
 
 def apply_plan(df, plan):
@@ -77,10 +81,7 @@ def apply_plan(df, plan):
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
     if df.empty:
-        return "❌ Could not load data from the sheet."
-
-    # Use sample for planning
-    sample_df = df.sample(min(len(df), 1000), random_state=42)
+        return "Could not load data from the sheet."
 
     dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items()])
     system_prompt = f"""
@@ -90,35 +91,33 @@ Data dictionary:
 {dictionary_text}
 
 Example data:
-{sample_df.head(5).to_string(index=False)}
+{df.head(5).to_string(index=False)}
 
 {kpi_guide}
 
-Return JSON only. No explanation.
+Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
 """
 
-    try:
-        plan_response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question}
-            ],
-            temperature=0.3,
-            timeout=20  # add timeout
-        )
-        plan = json.loads(plan_response.choices[0].message.content)
-    except Exception as e:
-        return f"❌ GPT planning failed: {e}"
+    plan_response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
+        ],
+        temperature=0.3
+    )
 
     try:
-        start = time.time()
+        content = plan_response.choices[0].message.content
+        plan = json.loads(content)
+
+        if not isinstance(plan, list):
+            raise ValueError("Returned plan is not a list")
+        if not any("sort_by" in step for step in plan):
+            raise ValueError("Plan is missing a sort_by step")
+
         df_result = apply_plan(df, plan)
-        elapsed = time.time() - start
-        if elapsed > 10:
-            return "⚠️ Operation took too long and may need simplification."
     except Exception as e:
         return f"❌ Failed to execute plan: {e}"
 
     return df_result.to_markdown(index=False) if not df_result.empty else "No results found."
-
