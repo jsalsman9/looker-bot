@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
 from difflib import get_close_matches
 import json
-import difflib
 
 load_dotenv()
 
@@ -34,54 +33,55 @@ When asked which campaign is "performing the best", consider metrics like:
 - Cost per acquisition (CPA = Spend / Conversions, lower is better)
 - Return on ad spend (ROAS = Revenue / Spend)
 
-Always include a `derive_column` and a `sort_by` step to determine performance.
-
-If multiple metrics apply, choose the most meaningful and explain why in a `comment` field.
+Choose a metric based on what is available in the data. If multiple apply, pick the most meaningful one and explain why.
 """
 
 def fuzzy_match_column(requested_col, actual_cols):
-    matches = difflib.get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
+    matches = get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
     return matches[0] if matches else requested_col
 
 def apply_plan(df, plan):
-    for step in plan:
-        if "filter" in step:
-            col = fuzzy_match_column(step["filter"]["column"], df.columns)
-            val = step["filter"]["value"]
-            df = df[df[col] == val]
+    debug_info = []
+    try:
+        for step in plan:
+            debug_info.append(f"Step: {step}")
+            if "filter" in step:
+                col = fuzzy_match_column(step["filter"]["column"], df.columns)
+                val = step["filter"]["value"]
+                df = df[df[col] == val]
 
-        elif "group_by" in step:
-            col = fuzzy_match_column(step["group_by"], df.columns)
-            df = df.groupby(col, as_index=False).first()
+            elif "group_by" in step:
+                col = fuzzy_match_column(step["group_by"], df.columns)
+                df = df.groupby(col, as_index=False).first()
 
-        elif "agg_column" in step:
-            agg_col = fuzzy_match_column(step["agg_column"], df.columns)
-            agg_func = step.get("agg_func", "sum")
-            group_col = df.columns[0] if df.columns[0] != agg_col else df.columns[1]
-            df = df.groupby(group_col, as_index=False).agg({agg_col: agg_func})
+            elif "agg_column" in step:
+                agg_col = fuzzy_match_column(step["agg_column"], df.columns)
+                agg_func = step.get("agg_func", "sum")
+                group_col = df.columns[0] if df.columns[0] != agg_col else df.columns[1]
+                df = df.groupby(group_col, as_index=False).agg({agg_col: agg_func})
 
-        elif "derive_column" in step:
-            new_col = step["derive_column"]
-            formula = step["formula"]
-            try:
+            elif "derive_column" in step:
+                new_col = step["derive_column"]
+                formula = step["formula"]
                 df.eval(f"{new_col} = {formula}", inplace=True)
-            except Exception as e:
-                raise ValueError(f"Failed to compute derived column {new_col}: {e}")
 
-        elif "sort_by" in step:
-            sort_col = fuzzy_match_column(step["sort_by"], df.columns)
-            order = step.get("sort_order", "desc") == "desc"
-            df = df.sort_values(by=sort_col, ascending=not order)
+            elif "sort_by" in step:
+                sort_col = fuzzy_match_column(step["sort_by"], df.columns)
+                order = step.get("sort_order", "desc") == "desc"
+                df = df.sort_values(by=sort_col, ascending=not order)
 
-        elif "limit" in step:
-            df = df.head(step["limit"])
+            elif "limit" in step:
+                df = df.head(step["limit"])
+
+    except Exception as e:
+        raise ValueError(f"Step failed: {e}\n\nSteps run: {debug_info}")
 
     return df
 
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
     if df.empty:
-        return "Could not load data from the sheet."
+        return "❌ Could not load data from the sheet."
 
     dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items()])
     system_prompt = f"""
@@ -91,11 +91,12 @@ Data dictionary:
 {dictionary_text}
 
 Example data:
-{df.head(5).to_string(index=False)}
+{df.sample(5, random_state=42).to_string(index=False)}
 
 {kpi_guide}
 
 Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
+Make sure to include a final sort_by step on a meaningful metric if answering a "best/worst" type of question.
 """
 
     plan_response = client.chat.completions.create(
@@ -111,9 +112,11 @@ Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
         plan = json.loads(plan_response.choices[0].message.content)
 
         if not any("sort_by" in step for step in plan):
-            fallback_metric = "Total Conversions" if "Total Conversions" in df.columns else df.columns[-1]
-            plan.append({"sort_by": fallback_metric, "sort_order": "desc"})
-            plan.append({"limit": 5})
+            # Add a default fallback sort
+            if "Total Conversions" in df.columns:
+                plan.append({"sort_by": "Total Conversions", "sort_order": "desc"})
+            elif "Clicks" in df.columns:
+                plan.append({"sort_by": "Clicks", "sort_order": "desc"})
 
         df_result = apply_plan(df, plan)
     except Exception as e:
