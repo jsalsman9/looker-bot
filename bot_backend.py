@@ -4,40 +4,39 @@ import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
-from difflib import get_close_matches
+import difflib
 import json
+import time
 
 load_dotenv()
-
 api_key = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=api_key)
 
 data_dictionary = {
-    "Campaign": "The marketing campaign name. This is lengthy and will contain codes and other alpha numerics",
+    "Campaign": "The marketing campaign name...",
     "Clicks": "Number of times the ad was clicked",
     "Impressions": "Number of times the ad was shown",
     "Media Cost": "Total ad spend in USD",
     "Date": "The date the ad was served (YYYY-MM-DD)",
     "Total Conversions": "Number of desired outcomes (e.g., signups, purchases)",
-    "advertiser": "The client that this table belongs to. Will be the same value",
-    "Activity ID": "Unique identifier for certain activities. Not all activities will have a set ID. Will not be important for analysis",
-    "Placement": "Where this ad was placed...",
-    "Video Plays": "The amount of times a video was played",
-    "video_completions": "The amount of times a user has completed a video ad"
+    "advertiser": "The client this table belongs to",
+    "Activity ID": "Unique identifier, not important for analysis",
+    "Placement": "Where the ad was placed",
+    "Video Plays": "Number of video plays",
+    "video_completions": "Video completions"
 }
 
 kpi_guide = """
-When asked which campaign is "performing the best", consider metrics like:
-- Conversions (higher is better)
-- Click-through rate (CTR = Clicks / Impressions)
-- Cost per acquisition (CPA = Spend / Conversions, lower is better)
-- Return on ad spend (ROAS = Revenue / Spend)
-
-Choose a metric based on what is available. If multiple apply, pick the most meaningful and explain why.
+When asked which campaign is "performing the best", consider:
+- Conversions (higher = better)
+- CTR = Clicks / Impressions
+- CPA = Spend / Conversions (lower = better)
+- ROAS = Revenue / Spend
+Pick the best available metric.
 """
 
 def fuzzy_match_column(requested_col, actual_cols):
-    matches = get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
+    matches = difflib.get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
     return matches[0] if matches else requested_col
 
 def apply_plan(df, plan):
@@ -78,12 +77,12 @@ def apply_plan(df, plan):
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
     if df.empty:
-        return "Could not load data from the sheet."
+        return "❌ Could not load data from the sheet."
+
+    # Use sample for planning
+    sample_df = df.sample(min(len(df), 1000), random_state=42)
 
     dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items()])
-    sample_columns = list(data_dictionary.keys())[:6]
-    df_sample = df[sample_columns].head(3) if all(col in df.columns for col in sample_columns) else df.head(3)
-
     system_prompt = f"""
 You are a data planner. Given a user question and the dataset description, return a JSON list of steps to answer it.
 
@@ -91,14 +90,14 @@ Data dictionary:
 {dictionary_text}
 
 Example data:
-{df_sample.to_string(index=False)}
+{sample_df.head(5).to_string(index=False)}
 
 {kpi_guide}
 
-Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
+Return JSON only. No explanation.
 """
 
-    with st.spinner("Planning..."):
+    try:
         plan_response = client.chat.completions.create(
             model="gpt-4",
             messages=[
@@ -106,15 +105,20 @@ Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
                 {"role": "user", "content": question}
             ],
             temperature=0.3,
-            timeout=20
+            timeout=20  # add timeout
         )
+        plan = json.loads(plan_response.choices[0].message.content)
+    except Exception as e:
+        return f"❌ GPT planning failed: {e}"
 
     try:
-        plan = json.loads(plan_response.choices[0].message.content)
-        st.write("🧠 GPT Plan:", plan)
+        start = time.time()
         df_result = apply_plan(df, plan)
+        elapsed = time.time() - start
+        if elapsed > 10:
+            return "⚠️ Operation took too long and may need simplification."
     except Exception as e:
-        st.error(f"❌ Failed to execute plan: {e}")
-        return "Failed to generate answer."
+        return f"❌ Failed to execute plan: {e}"
 
     return df_result.to_markdown(index=False) if not df_result.empty else "No results found."
+
