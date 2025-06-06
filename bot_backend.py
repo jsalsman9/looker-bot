@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
 from difflib import get_close_matches
 import json
+import difflib
 
 load_dotenv()
 
@@ -33,14 +34,13 @@ When asked which campaign is "performing the best", consider metrics like:
 - Cost per acquisition (CPA = Spend / Conversions, lower is better)
 - Return on ad spend (ROAS = Revenue / Spend)
 
-Choose a metric based on what is available in the data. If multiple apply, pick the most meaningful one and explain why.
-Always include a derive_column step to compute the metric.
-Exclude rows with 0 Impressions or Conversions.
-Include a sort_by and limit step to rank the results.
+Always include a `derive_column` and a `sort_by` step to determine performance.
+
+If multiple metrics apply, choose the most meaningful and explain why in a `comment` field.
 """
 
 def fuzzy_match_column(requested_col, actual_cols):
-    matches = get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
+    matches = difflib.get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
     return matches[0] if matches else requested_col
 
 def apply_plan(df, plan):
@@ -108,13 +108,12 @@ Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
     )
 
     try:
-        content = plan_response.choices[0].message.content
-        plan = json.loads(content)
+        plan = json.loads(plan_response.choices[0].message.content)
 
-        if not isinstance(plan, list):
-            raise ValueError("Returned plan is not a list")
         if not any("sort_by" in step for step in plan):
-            raise ValueError("Plan is missing a sort_by step")
+            fallback_metric = "Total Conversions" if "Total Conversions" in df.columns else df.columns[-1]
+            plan.append({"sort_by": fallback_metric, "sort_order": "desc"})
+            plan.append({"limit": 5})
 
         df_result = apply_plan(df, plan)
     except Exception as e:
