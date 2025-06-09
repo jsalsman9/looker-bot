@@ -92,17 +92,31 @@ def analyze_question(question: str, sheet_url: str):
     ])
 
     system_prompt = f"""
-You are a data planner. Given a user question and the dataset description, return a JSON list of steps to answer it.
+You are a data planner bot. Your job is to output a JSON plan that a Python backend will execute to answer the user's question.
+
+You will be given:
+- A data dictionary (describing each column)
+- A preview of the dataset (first 5 rows)
+- A guide to common KPIs
+
+Your output must be a **valid JSON list of dictionaries** representing executable steps.
+Each step should use one of these keys (only one per step):
+- "filter": {{"column": "...", "value": "..."}}
+- "group_by": "column_name"
+- "agg_column": "column_name", "agg_func": "sum" | "mean" | "count" | "nunique"
+- "derive_column": "new_column", "formula": "Clicks / Impressions"
+- "sort_by": "column_name", "sort_order": "asc" | "desc"
+- "limit": number
+
+Only return a valid JSON list of steps. Do **not** explain anything. Do **not** include a `"step"` key. If unsure, make a reasonable guess.
 
 Data dictionary:
 {dictionary_text}
 
-Example data:
-{sample_df.to_string(index=False)}
+Dataset preview:
+{df.head(5).to_string(index=False)}
 
 {kpi_guide}
-
-Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
 """
 
     plan_response = client.chat.completions.create(
