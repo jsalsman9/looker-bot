@@ -54,6 +54,9 @@ def apply_plan(df, plan):
         elif "agg_column" in step:
             agg_col = fuzzy_match_column(step["agg_column"], df.columns)
             agg_func = step.get("agg_func", "sum")
+            if agg_func == "nunique":
+                # Return a 1-row, 1-column DataFrame with the unique count
+                return pd.DataFrame({f"Unique {agg_col}": [df[agg_col].nunique()]})
             group_col = df.columns[0] if df.columns[0] != agg_col else df.columns[1]
             df = df.groupby(group_col, as_index=False).agg({agg_col: agg_func})
 
@@ -75,20 +78,21 @@ def apply_plan(df, plan):
 
     return df
 
+
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
     if df.empty:
         return "❌ Could not load data from the sheet."
 
-    sample_df = df.sample(n=min(3, len(df)), random_state=42)
-
     essential_columns = [
         "Campaign", "Clicks", "Impressions", "Media Cost",
         "Date", "Total Conversions"
     ]
+    filtered_cols = [col for col in essential_columns if col in df.columns]
+    sample_df = df[filtered_cols].sample(n=min(3, len(df)), random_state=42)
+
     dictionary_text = "\n".join([
-        f"{col}: {data_dictionary[col]}"
-        for col in essential_columns if col in data_dictionary
+        f"{col}: {data_dictionary[col]}" for col in filtered_cols if col in data_dictionary
     ])
 
     system_prompt = f"""
@@ -96,7 +100,7 @@ You are a data planner bot. Your job is to output a JSON plan that a Python back
 
 You will be given:
 - A data dictionary (describing each column)
-- A preview of the dataset (first 5 rows)
+- A preview of the dataset (sample rows)
 - A guide to common KPIs
 
 Your output must be a **valid JSON list of dictionaries** representing executable steps.
@@ -108,12 +112,13 @@ Each step should use one of these keys (only one per step):
 - "sort_by": "column_name", "sort_order": "asc" | "desc"
 - "limit": number
 
-Only return a valid JSON list of steps. Do **not** explain anything. Do **not** include a `"step"` key. If unsure, make a reasonable guess.
+🛑 Only return valid JSON (no comments or explanation).
+⚠️ If the user asks for something like "How many campaigns are there?", use just an aggregation step (e.g., "agg_column": "Campaign", "agg_func": "nunique") with no group_by.
 
 Data dictionary:
 {dictionary_text}
 
-Dataset preview:
+Sample dataset:
 {sample_df.to_string(index=False)}
 
 {kpi_guide}
@@ -133,19 +138,15 @@ Dataset preview:
         if not raw_plan:
             return "❌ GPT returned an empty response."
 
-        print("🧠 Raw GPT Plan:", repr(raw_plan))
+        print("🧠 Raw GPT Plan:", raw_plan)
 
-        # Clean markdown or formatting if GPT wraps output
-        if raw_plan.startswith("```"):
-            raw_plan = raw_plan.strip("`").strip("json").strip()
-
-        plan = json.loads(raw_plan)
+        try:
+            plan = json.loads(raw_plan)
+        except json.JSONDecodeError as e:
+            return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
 
         df_result = apply_plan(df, plan)
+        return df_result.to_markdown(index=False) if not df_result.empty else "No results found."
 
-    except json.JSONDecodeError as e:
-        return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
     except Exception as e:
-        return f"❌ Failed to execute plan: {e}"
-
-    return df_result.to_markdown(index=False) if not df_result.empty else "No results found."
+        return f"❌ Unexpected error while processing: {e}"
