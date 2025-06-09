@@ -134,13 +134,20 @@ Sample dataset:
     )
 
     try:
-        raw_plan = plan_response.choices[0].message.content.strip()
-        if not raw_plan:
+        raw_plan = plan_response.choices[0].message.content
+        if not raw_plan or not raw_plan.strip():
             return "❌ GPT returned an empty response."
 
-        print("🧠 Raw GPT Plan:", raw_plan)
+        raw_plan = raw_plan.strip()
+        print("🧠 Raw GPT Plan:\n", raw_plan)
 
         try:
+            # GPT sometimes includes ```json ... ``` wrapping — strip it
+            if raw_plan.startswith("```"):
+                raw_plan = raw_plan.strip("` \n")
+                if raw_plan.startswith("json"):
+                    raw_plan = raw_plan[4:].strip()
+        
             plan = json.loads(raw_plan)
         except json.JSONDecodeError as e:
             return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
