@@ -1,17 +1,17 @@
 import os
 import streamlit as st
 import pandas as pd
+import numpy as np
 from openai import OpenAI
 from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
 import json
-import traceback
 
 load_dotenv()
+
 api_key = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=api_key)
 
-# You can extend this as needed
 data_dictionary = {
     "Campaign": "The marketing campaign name. This is lengthy and will contain codes and other alpha numerics",
     "Clicks": "Number of times the ad was clicked",
@@ -27,11 +27,13 @@ data_dictionary = {
 }
 
 kpi_guide = """
-When asked about performance, consider metrics like:
+When asked which campaign is "performing the best", consider metrics like:
+- Conversions (higher is better)
 - Click-through rate (CTR = Clicks / Impressions)
-- Cost per acquisition (CPA = Media Cost / Conversions, lower is better)
-- Conversion rate = Conversions / Clicks
-- Return on ad spend (ROAS = Revenue / Media Cost)
+- Cost per acquisition (CPA = Spend / Conversions, lower is better)
+- Return on ad spend (ROAS = Revenue / Spend)
+
+Choose a metric based on what is available in the data. If multiple apply, pick the most meaningful one and explain why.
 """
 
 def analyze_question(question: str, sheet_url: str):
@@ -39,41 +41,37 @@ def analyze_question(question: str, sheet_url: str):
     if df.empty:
         return "❌ Could not load data from the sheet."
 
-    # Sample and prepare dictionary text
     sample_df = df.sample(n=min(3, len(df)), random_state=42)
+
     dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items() if col in df.columns])
 
-    # Step 1: Planning prompt to generate code
     planning_prompt = f"""
-You are a Python data analyst bot.
-
-Your job is to write pure Python code (no explanation) that will answer the user's question.
-You are given:
+You are a Python data analyst. You will be given:
+- A user question
 - A data dictionary
-- A few rows of example data (in a pandas DataFrame called df)
-- A guide to useful metrics
-- The user's question
+- A preview of the dataset
+- A guide to common marketing KPIs
 
-✅ The df variable is already loaded.
-✅ You may create multiple result variables if useful.
-✅ Only use columns that exist in the data dictionary or preview.
+Your task is to write Python code using ONLY the provided dataframe `df` to answer the user's question. Do not generate results yourself — only provide Python code.
 
-❌ Do NOT import anything.
-❌ Do NOT define the DataFrame or read files.
-❌ Do NOT wrap the code in markdown or quotes.
-❌ Do NOT include explanations.
-
-📌 Your job is to return **just the Python code** that performs any necessary filtering, aggregating, or deriving metrics to answer the user's question. Use pandas idioms.
-
-User question: {question}
+⚠️ Guidelines:
+- The dataframe is already named `df`
+- ✅ Use pandas and numpy only — numpy is available as `np`
+- ❌ Do NOT import anything
+- ❌ Do NOT print() anything — return your result as a variable `result`
+- ✅ Create and return ONE variable: `result`
+- `result` can be a DataFrame, Series, number, string, etc.
 
 Data dictionary:
 {dictionary_text}
 
-Example data:
-{sample_df.to_markdown(index=False)}
+Sample data:
+{sample_df.to_string(index=False)}
 
 {kpi_guide}
+
+User question:
+{question}
 """
 
     try:
@@ -84,48 +82,40 @@ Example data:
             ],
             temperature=0.3
         )
-        generated_code = plan_response.choices[0].message.content.strip()
-        print("🔧 Generated code:\n", generated_code)
 
-        # Step 2: Execute code safely in local scope
-        local_vars = {"df": df.copy()}
+        generated_code = plan_response.choices[0].message.content.strip()
+
+        if generated_code.startswith("```"):
+            generated_code = generated_code.strip("` ")
+            if generated_code.startswith("python"):
+                generated_code = generated_code[len("python"):].strip()
+
+        local_vars = {"df": df.copy(), "np": np}
         exec(generated_code, {}, local_vars)
 
-        # Step 3: Gather all result variables (non-dataframe summaries)
-        outputs = {}
-        for name, val in local_vars.items():
-            if name == "df":
-                continue
-            if isinstance(val, pd.DataFrame):
-                outputs[name] = val.to_markdown(index=False)
-            else:
-                outputs[name] = str(val)
+        result = local_vars.get("result")
+        if result is None:
+            return "❌ No result was returned by the code."
 
-        if not outputs:
-            return "✅ Code ran but no result variables were returned."
+        explanation_prompt = f"""
+You are a helpful data analyst. The user asked:
+"{question}"
 
-        # Step 4: Summarize results with GPT
-        output_text = "\n\n".join([f"{k}:\n{v}" for k, v in outputs.items()])
-        summary_prompt = f"""
-You are a helpful data analyst.
+Here is the result of your analysis:
+{str(result)[:2000]}
 
-The user asked:
-{question}
-
-You ran the analysis and got the following results:
-{output_text}
-
-Write a short, clear answer to the user's question using the results above.
+Write a clear, concise answer for the user based on this result.
 """
-        summary_response = client.chat.completions.create(
+
+        explain_response = client.chat.completions.create(
             model="gpt-4-1106-preview",
             messages=[
-                {"role": "system", "content": summary_prompt}
+                {"role": "system", "content": explanation_prompt}
             ],
             temperature=0.3
         )
 
-        return f"**Answer:** {summary_response.choices[0].message.content.strip()}"
+        return f"**Answer:** {explain_response.choices[0].message.content.strip()}"
 
     except Exception as e:
-        return f"❌ Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
+        return f"❌ Error: {e}"
