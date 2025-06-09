@@ -7,23 +7,10 @@ from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
 
 load_dotenv()
-
 api_key = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=api_key)
 
-data_dictionary = {
-    "Campaign": "The marketing campaign name. This is lengthy and will contain codes and other alpha numerics",
-    "Clicks": "Number of times the ad was clicked",
-    "Impressions": "Number of times the ad was shown",
-    "Media Cost": "Total ad spend in USD",
-    "Date": "The date the ad was served (YYYY-MM-DD)",
-    "Total Conversions": "Number of desired outcomes (e.g., signups, purchases)",
-    "advertiser": "The client that this table belongs to. Will be the same value",
-    "Activity ID": "Unique identifier for certain activities. Not all activities will have a set ID. Will not be important for analysis",
-    "Placement": "Where this ad was placed. This is a very specific and long alpha numeric that contains where the ad was place, what type of ad was placed, and even the layout size of the ad",
-    "Video Plays": "The amount of times a video was played for that ad",
-    "video_completions": "The amount of times a user has completed a ad video in it's entirety"
-}
+from data_dictionary import data_dictionary, kpi_guide  # optional
 
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
@@ -31,77 +18,87 @@ def analyze_question(question: str, sheet_url: str):
         return "❌ Could not load data from the sheet."
 
     sample_df = df.sample(n=min(5, len(df)), random_state=42)
+
     dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items() if col in df.columns])
 
     planning_prompt = f"""
-You are a data analyst assistant. Given a user question, a data dictionary, and sample data, generate Python code to help answer the question.
+You are a helpful data analyst.
+You are provided with:
+- A sample of a dataset (`df`)
+- A data dictionary describing each column
+- A user question
 
-- Use only the columns described in the data dictionary.
-- You may create multiple named variables if needed (e.g., campaign_summary, top_conversions).
-- Do not print anything. Just define the variables.
-- Output only executable Python code.
+You must return valid **Python code** to answer the user's question using ONLY the columns in the data.
+- Use the variable `df` (a pandas DataFrame).
+- You may define intermediate variables.
+- You **must** end with:
+  ```python
+  results = {
+      "metric1": value1,
+      "metric2": value2
+  }
+  ```
+- If a result is a DataFrame, assign it as a value (e.g., `"top_campaigns": top_df`).
 
-User question:
-"{question}"
+🛑 Do NOT include any explanation or text — only Python code.
 
 Data dictionary:
 {dictionary_text}
 
 Sample data:
-{sample_df.to_string(index=False)}
+{sample_df.to_markdown(index=False)}
+
+{kpi_guide}
+
+User question: {question}
 """
 
     try:
-        plan_response = client.chat.completions.create(
+        code_response = client.chat.completions.create(
             model="gpt-4-1106-preview",
             messages=[
-                {"role": "system", "content": planning_prompt}
+                {"role": "system", "content": planning_prompt},
+                {"role": "user", "content": question}
             ],
-            temperature=0.2
+            temperature=0
         )
-        raw_code = plan_response.choices[0].message.content.strip()
+        code = code_response.choices[0].message.content.strip()
+        if code.startswith("```"):
+            code = code.strip("` ")
+            if code.startswith("python"):
+                code = code[len("python"):].strip()
+    except Exception as e:
+        return f"❌ Error during code generation: {e}"
 
-        if raw_code.startswith("```"):
-            raw_code = raw_code.strip("` ")
-            if raw_code.startswith("python"):
-                raw_code = raw_code[len("python"):].strip()
+    # Execute generated code
+    local_vars = {}
+    try:
+        exec(code, {"df": df, "pd": pd}, local_vars)
+        results = local_vars.get("results")
+        if results is None:
+            return "❌ Code did not assign `results` dictionary."
+    except Exception as e:
+        return f"❌ Error executing generated code: {e}\n\nCode was:\n```python\n{code}\n```"
 
-        local_vars = {"df": df.copy()}
-        exec(raw_code, {}, local_vars)
-
-        # Gather small result objects for LLM summary
-        objects_for_summary = {}
-        for name, val in local_vars.items():
-            if name.startswith("_") or name == "df":
-                continue
-            if isinstance(val, (int, float, str)):
-                objects_for_summary[name] = val
-            elif isinstance(val, pd.DataFrame) and val.shape[0] <= 5:
-                objects_for_summary[name] = val.to_markdown(index=False)
-
-        if not objects_for_summary:
-            return "✅ Code executed, but no readable result objects were produced."
-
-        summary_prompt = f"""
-You are a helpful data analyst. The user originally asked:
+    # Second LLM pass to summarize
+    summary_prompt = f"""
+You are a helpful data analyst.
+The user originally asked:
 "{question}"
 
-Here are the Python result objects that were created:
+Here are the results of the analysis:
+{json.dumps({k: str(v) for k, v in results.items()}, indent=2)}
+
+Please summarize the answer clearly and concisely for the user.
 """
-        for k, v in objects_for_summary.items():
-            summary_prompt += f"\n{k} =\n{v}\n"
-
-        summary_prompt += "\nWrite a concise and helpful response based on this information."
-
-        summary_response = client.chat.completions.create(
+    try:
+        final_response = client.chat.completions.create(
             model="gpt-4-1106-preview",
             messages=[
                 {"role": "system", "content": summary_prompt}
             ],
             temperature=0.3
         )
-
-        return f"**Answer:** {summary_response.choices[0].message.content.strip()}"
-
+        return f"**Answer:** {final_response.choices[0].message.content.strip()}"
     except Exception as e:
-        return f"❌ Error: {e}"
+        return f"✅ Executed code but failed to summarize: {e}\n\n{json.dumps(results, indent=2)}"
