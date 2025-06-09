@@ -1,10 +1,10 @@
 import os
+import json
 import streamlit as st
 import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
-import json
 
 load_dotenv()
 
@@ -25,43 +25,30 @@ data_dictionary = {
     "video_completions": "The amount of times a user has completed a ad video in it's entirety"
 }
 
-kpi_guide = """
-When asked which campaign is "performing the best", consider metrics like:
-- Conversions (higher is better)
-- Click-through rate (CTR = Clicks / Impressions)
-- Cost per acquisition (CPA = Spend / Conversions, lower is better)
-- Return on ad spend (ROAS = Revenue / Spend)
-
-Choose a metric based on what is available in the data. If multiple apply, pick the most meaningful one and explain why.
-"""
-
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
     if df.empty:
         return "❌ Could not load data from the sheet."
 
     sample_df = df.sample(n=min(5, len(df)), random_state=42)
-    dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items()])
+    dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items() if col in df.columns])
 
     planning_prompt = f"""
-You are a Python data analyst assistant. Your job is to write Python code to analyze the dataset and answer the user's question.
+You are a data analyst assistant. Given a user question, a data dictionary, and sample data, generate Python code to help answer the question.
 
-You will receive:
-1. A data dictionary describing the columns
-2. A preview of the dataset
-3. The user's question
+- Use only the columns described in the data dictionary.
+- You may create multiple named variables if needed (e.g., campaign_summary, top_conversions).
+- Do not print anything. Just define the variables.
+- Output only executable Python code.
 
-Your job is to write valid Python code that uses the variable `df` (a pandas DataFrame) to answer the question. Save the final result in a variable called `result`.
-Do not write explanations or comments. Only output code. Use only the columns available.
+User question:
+"{question}"
 
 Data dictionary:
 {dictionary_text}
 
 Sample data:
 {sample_df.to_string(index=False)}
-
-User question:
-{question}
 """
 
     try:
@@ -70,36 +57,41 @@ User question:
             messages=[
                 {"role": "system", "content": planning_prompt}
             ],
-            temperature=0.3
+            temperature=0.2
         )
-        code = plan_response.choices[0].message.content.strip()
-        if code.startswith("```"):
-            code = code.strip("` \n")
-            if code.startswith("python"):
-                code = code[len("python"):].strip()
+        raw_code = plan_response.choices[0].message.content.strip()
 
-        if not code:
-            return "❌ GPT returned empty code."
+        if raw_code.startswith("```"):
+            raw_code = raw_code.strip("` ")
+            if raw_code.startswith("python"):
+                raw_code = raw_code[len("python"):].strip()
 
-        print("🔧 Generated code:\n", code)
-
-        code = code.strip() + "\n"
         local_vars = {"df": df.copy()}
-        exec(code, {}, local_vars)
+        exec(raw_code, {}, local_vars)
 
-        result = local_vars.get("result", None)
-        if result is None:
-            return "✅ Code executed but no result was returned."
+        # Gather small result objects for LLM summary
+        objects_for_summary = {}
+        for name, val in local_vars.items():
+            if name.startswith("_") or name == "df":
+                continue
+            if isinstance(val, (int, float, str)):
+                objects_for_summary[name] = val
+            elif isinstance(val, pd.DataFrame) and val.shape[0] <= 5:
+                objects_for_summary[name] = val.to_markdown(index=False)
+
+        if not objects_for_summary:
+            return "✅ Code executed, but no readable result objects were produced."
 
         summary_prompt = f"""
-You are a helpful data analyst. The user asked:
+You are a helpful data analyst. The user originally asked:
 "{question}"
 
-Here is the result from the dataset:
-{str(result)}
-
-Summarize the findings clearly and concisely for the user.
+Here are the Python result objects that were created:
 """
+        for k, v in objects_for_summary.items():
+            summary_prompt += f"\n{k} =\n{v}\n"
+
+        summary_prompt += "\nWrite a concise and helpful response based on this information."
 
         summary_response = client.chat.completions.create(
             model="gpt-4-1106-preview",
@@ -108,7 +100,8 @@ Summarize the findings clearly and concisely for the user.
             ],
             temperature=0.3
         )
-        return summary_response.choices[0].message.content.strip()
+
+        return f"**Answer:** {summary_response.choices[0].message.content.strip()}"
 
     except Exception as e:
-        return f"❌ Error executing generated code: {e}"
+        return f"❌ Error: {e}"
