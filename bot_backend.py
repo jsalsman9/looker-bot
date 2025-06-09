@@ -141,20 +141,17 @@ Sample dataset:
         raw_plan = raw_plan.strip()
         print("🧠 Raw GPT Plan:\n", raw_plan)
 
-        try:
-            # GPT sometimes includes ```json ... ``` wrapping — strip it
-            if raw_plan.startswith("```"):
-                raw_plan = raw_plan.strip("` \n")
-                if raw_plan.startswith("json"):
-                    raw_plan = raw_plan[4:].strip()
-        
-            plan = json.loads(raw_plan)
-        except json.JSONDecodeError as e:
-            return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
+        if raw_plan.startswith("```"):
+            raw_plan = raw_plan.strip("` \n")
+            if raw_plan.startswith("json"):
+                raw_plan = raw_plan[4:].strip()
+
+        plan = json.loads(raw_plan)
 
         df_result = apply_plan(df, plan)
-        # Second GPT pass: explain the summarized result in natural language
-summary_prompt = f"""
+
+        # SECOND PASS: GPT summarizes the result
+        summary_prompt = f"""
 You are a helpful data analyst. The user originally asked:
 
 "{question}"
@@ -165,20 +162,16 @@ After analyzing the data, here are the summarized results:
 
 Please write a brief and clear answer to the user's question based on this result.
 """
+        final_response = client.chat.completions.create(
+            model="gpt-4-1106-preview",
+            messages=[
+                {"role": "system", "content": summary_prompt}
+            ],
+            temperature=0.3
+        )
+        return f"**Answer:** {final_response.choices[0].message.content.strip()}"
 
-try:
-    final_response = client.chat.completions.create(
-        model="gpt-4-1106-preview",
-        messages=[
-            {"role": "system", "content": summary_prompt}
-        ],
-        temperature=0.3
-    )
-    return f"**Answer:** {final_response.choices[0].message.content.strip()}"
-
-except Exception as e:
-    return f"✅ Executed plan but failed to summarize: {e}\n\n{df_result.to_markdown(index=False)}"
-
-
+    except json.JSONDecodeError as e:
+        return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
     except Exception as e:
         return f"❌ Unexpected error while processing: {e}"
