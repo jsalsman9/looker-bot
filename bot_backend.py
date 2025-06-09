@@ -4,7 +4,7 @@ import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
-from difflib import get_close_matches
+import difflib
 import json
 
 load_dotenv()
@@ -37,7 +37,7 @@ Choose a metric based on what is available in the data. If multiple apply, pick 
 """
 
 def fuzzy_match_column(requested_col, actual_cols):
-    matches = get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
+    matches = difflib.get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
     return matches[0] if matches else requested_col
 
 def apply_plan(df, plan):
@@ -80,61 +80,44 @@ def analyze_question(question: str, sheet_url: str):
     if df.empty:
         return "❌ Could not load data from the sheet."
 
-    dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items()])
-    planning_prompt = f"""
-You are a data planning assistant. Your task is to design a plan to answer the user's question using ONLY the provided data schema.
+    sample_df = df.sample(n=min(3, len(df)), random_state=42)
 
-Data Dictionary:
+    essential_columns = [
+        "Campaign", "Clicks", "Impressions", "Media Cost",
+        "Date", "Total Conversions"
+    ]
+    dictionary_text = "\n".join([
+        f"{col}: {data_dictionary[col]}"
+        for col in essential_columns if col in data_dictionary
+    ])
+
+    system_prompt = f"""
+You are a data planner. Given a user question and the dataset description, return a JSON list of steps to answer it.
+
+Data dictionary:
 {dictionary_text}
 
-Here is a random sample of the actual data:
-{df.sample(min(len(df), 300)).to_string(index=False)}
+Example data:
+{sample_df.to_string(index=False)}
 
 {kpi_guide}
 
-Given the question: "{{question}}"
-
-Output ONLY a valid JSON list of Python operations using columns from the schema. Example operations include:
-- filter: {{"column": "", "value": ""}}
-- group_by: "column"
-- agg_column: "column", agg_func: "sum" or "count" or "mean"
-- derive_column: create new column using arithmetic (e.g. Clicks / Impressions)
-- sort_by: column with sort_order
-- limit: number of rows
-
-You must not reference columns that aren't present in the schema.
+Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
 """
 
     plan_response = client.chat.completions.create(
-        model="gpt-4",
+        model="gpt-4-1106-preview",
         messages=[
-            {"role": "system", "content": planning_prompt.replace("{{question}}", question)}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question}
         ],
         temperature=0.3
     )
 
     try:
         plan = json.loads(plan_response.choices[0].message.content)
-        df_result = apply_plan(df.copy(), plan)
+        df_result = apply_plan(df, plan)
     except Exception as e:
         return f"❌ Failed to execute plan: {e}"
 
-    explanation_prompt = f"""
-Here is the result of applying a data analysis plan:
-
-{df_result.head(10).to_markdown(index=False)}
-
-The user's original question was: "{question}"
-
-Please provide a helpful interpretation of this result in plain English.
-"""
-
-    explanation = client.chat.completions.create(
-        model="gpt-4",
-        messages=[
-            {"role": "system", "content": explanation_prompt}
-        ],
-        temperature=0.4
-    )
-
-    return explanation.choices[0].message.content
+    return df_result.to_markdown(index=False) if not df_result.empty else "No results found."
