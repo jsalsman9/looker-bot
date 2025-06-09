@@ -153,7 +153,32 @@ Sample dataset:
             return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
 
         df_result = apply_plan(df, plan)
-        return df_result.to_markdown(index=False) if not df_result.empty else "No results found."
+        # Second GPT pass: explain the summarized result in natural language
+summary_prompt = f"""
+You are a helpful data analyst. The user originally asked:
+
+"{question}"
+
+After analyzing the data, here are the summarized results:
+
+{df_result.to_markdown(index=False)}
+
+Please write a brief and clear answer to the user's question based on this result.
+"""
+
+try:
+    final_response = client.chat.completions.create(
+        model="gpt-4-1106-preview",
+        messages=[
+            {"role": "system", "content": summary_prompt}
+        ],
+        temperature=0.3
+    )
+    return f"**Answer:** {final_response.choices[0].message.content.strip()}"
+
+except Exception as e:
+    return f"✅ Executed plan but failed to summarize: {e}\n\n{df_result.to_markdown(index=False)}"
+
 
     except Exception as e:
         return f"❌ Unexpected error while processing: {e}"
