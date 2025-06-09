@@ -115,7 +115,14 @@ Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
     )
 
     try:
-        plan = json.loads(plan_response.choices[0].message.content)
+        raw_plan = plan_response.choices[0].message.content.strip()
+        if not raw_plan:
+            return "❌ GPT returned an empty response."
+        try:
+            plan = json.loads(raw_plan)
+        except json.JSONDecodeError as e:
+            return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
+            
         df_result = apply_plan(df, plan)
     except Exception as e:
         return f"❌ Failed to execute plan: {e}"
