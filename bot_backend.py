@@ -1,162 +1,100 @@
 import os
 import streamlit as st
 import pandas as pd
+import json
 from openai import OpenAI
 from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
-import json
 
 load_dotenv()
 
 api_key = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=api_key)
 
-# Example data dictionary – customize this as needed
 data_dictionary = {
-    "Campaign": "The marketing campaign name",
+    "Campaign": "The marketing campaign name. This is lengthy and will contain codes and other alpha numerics",
     "Clicks": "Number of times the ad was clicked",
     "Impressions": "Number of times the ad was shown",
     "Media Cost": "Total ad spend in USD",
     "Date": "The date the ad was served (YYYY-MM-DD)",
-    "Total Conversions": "Number of desired outcomes (e.g., signups, purchases)"
+    "Total Conversions": "Number of desired outcomes (e.g., signups, purchases)",
+    "advertiser": "The client that this table belongs to. Will be the same value",
+    "Activity ID": "Unique identifier for certain activities. Not all activities will have a set ID. Will not be important for analysis",
+    "Placement": "Where this ad was placed. This is a very specific and long alpha numeric that contains where the ad was place, what type of ad was placed, and even the layout size of the ad",
+    "Video Plays": "The amount of times a video was played for that ad",
+    "video_completions": "The amount of times a user has completed a ad video in it's entirety"
 }
-
-kpi_guide = """
-When asked which campaign is "performing the best", consider metrics like:
-- Conversions (higher is better)
-- Click-through rate (CTR = Clicks / Impressions)
-- Cost per acquisition (CPA = Spend / Conversions, lower is better)
-- Return on ad spend (ROAS = Revenue / Spend)
-"""
-
-def apply_plan(df, plan):
-    for step in plan:
-        if "filter" in step:
-            col = step["filter"]["column"]
-            val = step["filter"]["value"]
-            df = df[df[col] == val]
-
-        elif "group_by" in step:
-            col = step["group_by"]
-            df = df.groupby(col, as_index=False).first()
-
-        elif "agg_column" in step:
-            agg_col = step["agg_column"]
-            agg_func = step.get("agg_func", "sum")
-            group_col = df.columns[0] if df.columns[0] != agg_col else df.columns[1]
-            df = df.groupby(group_col, as_index=False).agg({agg_col: agg_func})
-
-        elif "derive_column" in step:
-            new_col = step["derive_column"]
-            formula = step["formula"]
-            df.eval(f"{new_col} = {formula}", inplace=True)
-
-        elif "sort_by" in step:
-            sort_col = step["sort_by"]
-            order = step.get("sort_order", "desc") == "desc"
-            df = df.sort_values(by=sort_col, ascending=not order)
-
-        elif "limit" in step:
-            df = df.head(step["limit"])
-
-        elif "code" in step:
-            local_vars = {"df": df.copy()}
-            try:
-                exec(step["code"], {}, local_vars)
-                if "df" in local_vars:
-                    df = local_vars["df"]
-                elif "result" in local_vars:
-                    df = pd.DataFrame({"Result": local_vars["result"]})
-            except Exception as e:
-                raise ValueError(f"Failed to execute custom code step: {e}")
-
-    return df
 
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
     if df.empty:
         return "❌ Could not load data from the sheet."
 
-    essential_columns = [
-        "Campaign", "Clicks", "Impressions", "Media Cost",
-        "Date", "Total Conversions"
-    ]
-    filtered_cols = [col for col in essential_columns if col in df.columns]
-    sample_df = df[filtered_cols].sample(n=min(3, len(df)), random_state=42)
+    sample_df = df.sample(n=min(5, len(df)), random_state=42)
+    dictionary_text = "\n".join([f"{k}: {v}" for k, v in data_dictionary.items() if k in df.columns])
 
-    dictionary_text = "\n".join([
-        f"{col}: {data_dictionary[col]}" for col in filtered_cols if col in data_dictionary
-    ])
+    # Step 1: Generate analysis code
+    planning_prompt = f"""
+You are a Python data analyst bot. You will receive:
+1. A user question
+2. A data dictionary
+3. A sample of the data
 
-    system_prompt = f"""
-You are a data planner bot. Your job is to output a JSON plan that a Python backend will execute to answer the user's question.
-
-You will be given:
-- A data dictionary (describing each column)
-- A preview of the dataset (sample rows)
-- A guide to common KPIs
-
-Your output must be a **valid JSON list of dictionaries** representing executable steps.
-Each step should use one of these keys (only one per step):
-- "filter": {{"column": "...", "value": "..."}}
-- "group_by": "column_name"
-- "agg_column": "column_name", "agg_func": "sum" | "mean" | "count" | "nunique"
-- "derive_column": "new_column", "formula": "Clicks / Impressions"
-- "sort_by": "column_name", "sort_order": "asc" | "desc"
-- "limit": number
-- "code": "Python code string that takes 'df' as input and updates or creates it"
-
-🛑 Only return valid JSON (no explanation).
-⚠️ If the user asks something like "What are the campaign names?", you   
-  {{ "code": "df = pd.DataFrame({{'Campaign': df['Campaign'].unique()}})" }}
+Write Python code using only available columns in the DataFrame `df` to answer the user's question.
+The final result should be stored in a variable named `result`. This can be a DataFrame or a string.
+Don't include explanations, comments, or markdown. Just clean Python code.
 
 Data dictionary:
 {dictionary_text}
 
-Sample dataset:
+Sample data:
 {sample_df.to_string(index=False)}
 
-{kpi_guide}
+User question:
+"{question}"
 """
 
-    plan_response = client.chat.completions.create(
+    code_response = client.chat.completions.create(
         model="gpt-4-1106-preview",
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
+            {"role": "system", "content": planning_prompt}
         ],
         temperature=0.3
     )
 
+    generated_code = code_response.choices[0].message.content.strip()
+    st.code(generated_code, language="python")  # Optional: show the generated code
+
+    # Step 2: Execute safely
+    local_vars = {"df": df}
     try:
-        raw_plan = plan_response.choices[0].message.content.strip()
-        if raw_plan.startswith("```"):
-            raw_plan = raw_plan.strip("` ")
-            if raw_plan.startswith("json"):
-                raw_plan = raw_plan[4:].strip()
+        exec(generated_code, {}, local_vars)
+        result = local_vars.get("result", None)
+        if result is None:
+            return "❌ Code did not produce a variable named `result`."
+    except Exception as e:
+        return f"❌ Error executing generated code: {e}"
 
-        plan = json.loads(raw_plan)
-        df_result = apply_plan(df, plan)
-
-        summary_prompt = f"""
-You are a helpful data analyst. The user originally asked:
-
+    # Step 3: Summarize result
+    result_preview = result.to_string(index=False) if isinstance(result, pd.DataFrame) else str(result)
+    summary_prompt = f"""
+You are a helpful data analyst. A user asked:
 "{question}"
 
-Here are the summarized results:
+Here is the output from a data analysis:
+{result_preview}
 
-{df_result.to_markdown(index=False)}
-
-Write a concise answer based on this result.
+Write a short, clear answer to the user's question.
 """
 
+    try:
         summary_response = client.chat.completions.create(
             model="gpt-4-1106-preview",
-            messages=[{"role": "system", "content": summary_prompt}],
+            messages=[
+                {"role": "system", "content": summary_prompt}
+            ],
             temperature=0.3
         )
-
         return f"**Answer:** {summary_response.choices[0].message.content.strip()}"
-
     except Exception as e:
-        return f"❌ Error: {e}"
+        return f"✅ Code ran successfully but failed to summarize: {e}\n\n{result_preview}"
