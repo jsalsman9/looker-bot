@@ -114,7 +114,7 @@ Data dictionary:
 {dictionary_text}
 
 Dataset preview:
-{df.head(5).to_string(index=False)}
+{sample_df.to_string(index=False)}
 
 {kpi_guide}
 """
@@ -133,18 +133,18 @@ Dataset preview:
         if not raw_plan:
             return "❌ GPT returned an empty response."
 
-        print("🧠 Raw GPT Plan:", raw_plan)
+        print("🧠 Raw GPT Plan:", repr(raw_plan))
 
-        try:
-            plan = json.loads(raw_plan)
-        except json.JSONDecodeError as e:
-            return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
+        # Clean markdown or formatting if GPT wraps output
+        if raw_plan.startswith("```"):
+            raw_plan = raw_plan.strip("`").strip("json").strip()
 
-    except Exception as e:
-        return f"❌ Unexpected error while handling GPT response: {e}"
+        plan = json.loads(raw_plan)
 
-            
         df_result = apply_plan(df, plan)
+
+    except json.JSONDecodeError as e:
+        return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
     except Exception as e:
         return f"❌ Failed to execute plan: {e}"
 
