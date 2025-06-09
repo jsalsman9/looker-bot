@@ -132,12 +132,17 @@ Dataset preview:
         raw_plan = plan_response.choices[0].message.content.strip()
         if not raw_plan:
             return "❌ GPT returned an empty response."
+
+        print("🧠 Raw GPT Plan:", raw_plan)
+
         try:
-            raw_plan = plan_response.choices[0].message.content
-            print("🧠 Raw GPT Plan:", raw_plan)
             plan = json.loads(raw_plan)
         except json.JSONDecodeError as e:
             return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
+
+    except Exception as e:
+        return f"❌ Unexpected error while handling GPT response: {e}"
+
             
         df_result = apply_plan(df, plan)
     except Exception as e:
