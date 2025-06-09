@@ -73,6 +73,10 @@ User question:
             temperature=0.3
         )
         code = plan_response.choices[0].message.content.strip()
+        if code.startswith("```"):
+            code = code.strip("` \n")
+            if code.startswith("python"):
+                code = code[len("python"):].strip()
 
         if not code:
             return "❌ GPT returned empty code."
