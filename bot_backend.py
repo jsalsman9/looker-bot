@@ -133,6 +133,8 @@ Dataset preview:
         if not raw_plan:
             return "❌ GPT returned an empty response."
         try:
+            raw_plan = plan_response.choices[0].message.content
+            print("🧠 Raw GPT Plan:", raw_plan)
             plan = json.loads(raw_plan)
         except json.JSONDecodeError as e:
             return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
