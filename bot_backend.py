@@ -4,7 +4,6 @@ import pandas as pd
 from openai import OpenAI
 from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
-import difflib
 import json
 
 load_dotenv()
@@ -12,18 +11,14 @@ load_dotenv()
 api_key = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=api_key)
 
+# Example data dictionary – customize this as needed
 data_dictionary = {
-    "Campaign": "The marketing campaign name. This is lengthy and will contain codes and other alpha numerics",
+    "Campaign": "The marketing campaign name",
     "Clicks": "Number of times the ad was clicked",
     "Impressions": "Number of times the ad was shown",
     "Media Cost": "Total ad spend in USD",
     "Date": "The date the ad was served (YYYY-MM-DD)",
-    "Total Conversions": "Number of desired outcomes (e.g., signups, purchases)",
-    "advertiser": "The client that this table belongs to. Will be the same value",
-    "Activity ID": "Unique identifier for certain activities. Not all activities will have a set ID. Will not be important for analysis",
-    "Placement": "Where this ad was placed. This is a very specific and long alpha numeric that contains where the ad was place, what type of ad was placed, and even the layout size of the ad",
-    "Video Plays": "The amount of times a video was played for that ad",
-    "video_completions": "The amount of times a user has completed a ad video in it's entirety"
+    "Total Conversions": "Number of desired outcomes (e.g., signups, purchases)"
 }
 
 kpi_guide = """
@@ -32,52 +27,50 @@ When asked which campaign is "performing the best", consider metrics like:
 - Click-through rate (CTR = Clicks / Impressions)
 - Cost per acquisition (CPA = Spend / Conversions, lower is better)
 - Return on ad spend (ROAS = Revenue / Spend)
-
-Choose a metric based on what is available in the data. If multiple apply, pick the most meaningful one and explain why.
 """
-
-def fuzzy_match_column(requested_col, actual_cols):
-    matches = difflib.get_close_matches(requested_col, actual_cols, n=1, cutoff=0.6)
-    return matches[0] if matches else requested_col
 
 def apply_plan(df, plan):
     for step in plan:
         if "filter" in step:
-            col = fuzzy_match_column(step["filter"]["column"], df.columns)
+            col = step["filter"]["column"]
             val = step["filter"]["value"]
             df = df[df[col] == val]
 
         elif "group_by" in step:
-            col = fuzzy_match_column(step["group_by"], df.columns)
+            col = step["group_by"]
             df = df.groupby(col, as_index=False).first()
 
         elif "agg_column" in step:
-            agg_col = fuzzy_match_column(step["agg_column"], df.columns)
+            agg_col = step["agg_column"]
             agg_func = step.get("agg_func", "sum")
-            if agg_func == "nunique":
-                # Return a 1-row, 1-column DataFrame with the unique count
-                return pd.DataFrame({f"Unique {agg_col}": [df[agg_col].nunique()]})
             group_col = df.columns[0] if df.columns[0] != agg_col else df.columns[1]
             df = df.groupby(group_col, as_index=False).agg({agg_col: agg_func})
 
         elif "derive_column" in step:
             new_col = step["derive_column"]
             formula = step["formula"]
-            try:
-                df.eval(f"{new_col} = {formula}", inplace=True)
-            except Exception as e:
-                raise ValueError(f"Failed to compute derived column {new_col}: {e}")
+            df.eval(f"{new_col} = {formula}", inplace=True)
 
         elif "sort_by" in step:
-            sort_col = fuzzy_match_column(step["sort_by"], df.columns)
+            sort_col = step["sort_by"]
             order = step.get("sort_order", "desc") == "desc"
             df = df.sort_values(by=sort_col, ascending=not order)
 
         elif "limit" in step:
             df = df.head(step["limit"])
 
-    return df
+        elif "code" in step:
+            local_vars = {"df": df.copy()}
+            try:
+                exec(step["code"], {}, local_vars)
+                if "df" in local_vars:
+                    df = local_vars["df"]
+                elif "result" in local_vars:
+                    df = pd.DataFrame({"Result": local_vars["result"]})
+            except Exception as e:
+                raise ValueError(f"Failed to execute custom code step: {e}")
 
+    return df
 
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
@@ -111,9 +104,11 @@ Each step should use one of these keys (only one per step):
 - "derive_column": "new_column", "formula": "Clicks / Impressions"
 - "sort_by": "column_name", "sort_order": "asc" | "desc"
 - "limit": number
+- "code": "Python code string that takes 'df' as input and updates or creates it"
 
-🛑 Only return valid JSON (no comments or explanation).
-⚠️ If the user asks for something like "How many campaigns are there?", use just an aggregation step (e.g., "agg_column": "Campaign", "agg_func": "nunique") with no group_by.
+🛑 Only return valid JSON (no explanation).
+⚠️ If the user asks something like "What are the campaign names?", you may return a `code` step like:
+  {{ "code": "df = pd.DataFrame({'Campaign': df['Campaign'].unique()})" }}
 
 Data dictionary:
 {dictionary_text}
@@ -134,44 +129,34 @@ Sample dataset:
     )
 
     try:
-        raw_plan = plan_response.choices[0].message.content
-        if not raw_plan or not raw_plan.strip():
-            return "❌ GPT returned an empty response."
-
-        raw_plan = raw_plan.strip()
-        print("🧠 Raw GPT Plan:\n", raw_plan)
-
+        raw_plan = plan_response.choices[0].message.content.strip()
         if raw_plan.startswith("```"):
-            raw_plan = raw_plan.strip("` \n")
+            raw_plan = raw_plan.strip("` ")
             if raw_plan.startswith("json"):
                 raw_plan = raw_plan[4:].strip()
 
         plan = json.loads(raw_plan)
-
         df_result = apply_plan(df, plan)
 
-        # SECOND PASS: GPT summarizes the result
         summary_prompt = f"""
 You are a helpful data analyst. The user originally asked:
 
 "{question}"
 
-After analyzing the data, here are the summarized results:
+Here are the summarized results:
 
 {df_result.to_markdown(index=False)}
 
-Please write a brief and clear answer to the user's question based on this result.
+Write a concise answer based on this result.
 """
-        final_response = client.chat.completions.create(
+
+        summary_response = client.chat.completions.create(
             model="gpt-4-1106-preview",
-            messages=[
-                {"role": "system", "content": summary_prompt}
-            ],
+            messages=[{"role": "system", "content": summary_prompt}],
             temperature=0.3
         )
-        return f"**Answer:** {final_response.choices[0].message.content.strip()}"
 
-    except json.JSONDecodeError as e:
-        return f"❌ Failed to parse plan JSON: {e}\nRaw response was:\n{raw_plan}"
+        return f"**Answer:** {summary_response.choices[0].message.content.strip()}"
+
     except Exception as e:
-        return f"❌ Unexpected error while processing: {e}"
+        return f"❌ Error: {e}"
