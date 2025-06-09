@@ -41,40 +41,37 @@ def fuzzy_match_column(requested_col, actual_cols):
     return matches[0] if matches else requested_col
 
 def apply_plan(df, plan):
-    debug_info = []
-    try:
-        for step in plan:
-            debug_info.append(f"Step: {step}")
-            if "filter" in step:
-                col = fuzzy_match_column(step["filter"]["column"], df.columns)
-                val = step["filter"]["value"]
-                df = df[df[col] == val]
+    for step in plan:
+        if "filter" in step:
+            col = fuzzy_match_column(step["filter"]["column"], df.columns)
+            val = step["filter"]["value"]
+            df = df[df[col] == val]
 
-            elif "group_by" in step:
-                col = fuzzy_match_column(step["group_by"], df.columns)
-                df = df.groupby(col, as_index=False).first()
+        elif "group_by" in step:
+            col = fuzzy_match_column(step["group_by"], df.columns)
+            df = df.groupby(col, as_index=False).first()
 
-            elif "agg_column" in step:
-                agg_col = fuzzy_match_column(step["agg_column"], df.columns)
-                agg_func = step.get("agg_func", "sum")
-                group_col = df.columns[0] if df.columns[0] != agg_col else df.columns[1]
-                df = df.groupby(group_col, as_index=False).agg({agg_col: agg_func})
+        elif "agg_column" in step:
+            agg_col = fuzzy_match_column(step["agg_column"], df.columns)
+            agg_func = step.get("agg_func", "sum")
+            group_col = df.columns[0] if df.columns[0] != agg_col else df.columns[1]
+            df = df.groupby(group_col, as_index=False).agg({agg_col: agg_func})
 
-            elif "derive_column" in step:
-                new_col = step["derive_column"]
-                formula = step["formula"]
+        elif "derive_column" in step:
+            new_col = step["derive_column"]
+            formula = step["formula"]
+            try:
                 df.eval(f"{new_col} = {formula}", inplace=True)
+            except Exception as e:
+                raise ValueError(f"Failed to compute derived column {new_col}: {e}")
 
-            elif "sort_by" in step:
-                sort_col = fuzzy_match_column(step["sort_by"], df.columns)
-                order = step.get("sort_order", "desc") == "desc"
-                df = df.sort_values(by=sort_col, ascending=not order)
+        elif "sort_by" in step:
+            sort_col = fuzzy_match_column(step["sort_by"], df.columns)
+            order = step.get("sort_order", "desc") == "desc"
+            df = df.sort_values(by=sort_col, ascending=not order)
 
-            elif "limit" in step:
-                df = df.head(step["limit"])
-
-    except Exception as e:
-        raise ValueError(f"Step failed: {e}\n\nSteps run: {debug_info}")
+        elif "limit" in step:
+            df = df.head(step["limit"])
 
     return df
 
@@ -84,42 +81,60 @@ def analyze_question(question: str, sheet_url: str):
         return "❌ Could not load data from the sheet."
 
     dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items()])
-    system_prompt = f"""
-You are a data planner. Given a user question and the dataset description, return a JSON list of steps to answer it.
+    planning_prompt = f"""
+You are a data planning assistant. Your task is to design a plan to answer the user's question using ONLY the provided data schema.
 
-Data dictionary:
+Data Dictionary:
 {dictionary_text}
 
-Example data:
-{df.sample(5, random_state=42).to_string(index=False)}
+Here is a random sample of the actual data:
+{df.sample(min(len(df), 300)).to_string(index=False)}
 
 {kpi_guide}
 
-Return the plan in JSON only. Do not explain it. If unsure, guess reasonably.
-Make sure to include a final sort_by step on a meaningful metric if answering a "best/worst" type of question.
+Given the question: "{{question}}"
+
+Output ONLY a valid JSON list of Python operations using columns from the schema. Example operations include:
+- filter: {{"column": "", "value": ""}}
+- group_by: "column"
+- agg_column: "column", agg_func: "sum" or "count" or "mean"
+- derive_column: create new column using arithmetic (e.g. Clicks / Impressions)
+- sort_by: column with sort_order
+- limit: number of rows
+
+You must not reference columns that aren't present in the schema.
 """
 
     plan_response = client.chat.completions.create(
         model="gpt-4",
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
+            {"role": "system", "content": planning_prompt.replace("{{question}}", question)}
         ],
         temperature=0.3
     )
 
     try:
         plan = json.loads(plan_response.choices[0].message.content)
-
-        if not any("sort_by" in step for step in plan):
-            # Add a default fallback sort
-            if "Total Conversions" in df.columns:
-                plan.append({"sort_by": "Total Conversions", "sort_order": "desc"})
-            elif "Clicks" in df.columns:
-                plan.append({"sort_by": "Clicks", "sort_order": "desc"})
-
-        df_result = apply_plan(df, plan)
+        df_result = apply_plan(df.copy(), plan)
     except Exception as e:
         return f"❌ Failed to execute plan: {e}"
 
-    return df_result.to_markdown(index=False) if not df_result.empty else "No results found."
+    explanation_prompt = f"""
+Here is the result of applying a data analysis plan:
+
+{df_result.head(10).to_markdown(index=False)}
+
+The user's original question was: "{question}"
+
+Please provide a helpful interpretation of this result in plain English.
+"""
+
+    explanation = client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": explanation_prompt}
+        ],
+        temperature=0.4
+    )
+
+    return explanation.choices[0].message.content
