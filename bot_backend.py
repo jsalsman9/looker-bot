@@ -107,8 +107,8 @@ Each step should use one of these keys (only one per step):
 - "code": "Python code string that takes 'df' as input and updates or creates it"
 
 🛑 Only return valid JSON (no explanation).
-⚠️ If the user asks something like "What are the campaign names?", you may return a `code` step like:
-  {{ "code": "df = pd.DataFrame({'Campaign': df['Campaign'].unique()})" }}
+⚠️ If the user asks something like "What are the campaign names?", you   
+  {{ "code": "df = pd.DataFrame({{'Campaign': df['Campaign'].unique()}})" }}
 
 Data dictionary:
 {dictionary_text}
