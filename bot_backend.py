@@ -1,14 +1,13 @@
 import os
+import json
 import streamlit as st
 import pandas as pd
 import numpy as np
 from openai import OpenAI
 from dotenv import load_dotenv
 from gsheet_helper import load_sheet_data
-import json
 
 load_dotenv()
-
 api_key = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=api_key)
 
@@ -26,41 +25,18 @@ data_dictionary = {
     "video_completions": "The amount of times a user has completed a ad video in it's entirety"
 }
 
-kpi_guide = """
-When asked which campaign is "performing the best", consider metrics like:
-- Conversions (higher is better)
-- Click-through rate (CTR = Clicks / Impressions)
-- Cost per acquisition (CPA = Spend / Conversions, lower is better)
-- Return on ad spend (ROAS = Revenue / Spend)
-
-Choose a metric based on what is available in the data. If multiple apply, pick the most meaningful one and explain why.
-"""
-
 def analyze_question(question: str, sheet_url: str):
     df = load_sheet_data(sheet_url)
     if df.empty:
         return "❌ Could not load data from the sheet."
 
+    # Small sample for GPT context
     sample_df = df.sample(n=min(3, len(df)), random_state=42)
 
-    dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items() if col in df.columns])
+    dictionary_text = "\n".join([f"{col}: {desc}" for col, desc in data_dictionary.items()])
 
     planning_prompt = f"""
-You are a Python data analyst. You will be given:
-- A user question
-- A data dictionary
-- A preview of the dataset
-- A guide to common marketing KPIs
-
-Your task is to write Python code using ONLY the provided dataframe `df` to answer the user's question. Do not generate results yourself — only provide Python code.
-
-⚠️ Guidelines:
-- The dataframe is already named `df`
-- ✅ Use pandas and numpy only — numpy is available as `np`
-- ❌ Do NOT import anything
-- ❌ Do NOT print() anything — return your result as a variable `result`
-- ✅ Create and return ONE variable: `result`
-- `result` can be a DataFrame, Series, number, string, etc.
+You are a Python data analyst. Your job is to write Python code that answers the user's question using ONLY the available data.
 
 Data dictionary:
 {dictionary_text}
@@ -68,54 +44,63 @@ Data dictionary:
 Sample data:
 {sample_df.to_string(index=False)}
 
-{kpi_guide}
+User question: "{question}"
 
-User question:
-{question}
+Please return a Python code block that:
+- Uses only the data in the DataFrame `df`
+- Defines one or more result variables (e.g., `result`, `top_campaigns`, etc.)
+- Avoids any placeholder or imaginary variables
+- Always wraps string values in quotes
+- Does NOT include print() or display() statements
+- Does NOT include import statements (those are already handled)
+- Handles edge cases like division by zero or missing values
+
+✅ Output ONLY a complete Python code block, no explanations.
 """
 
+    plan_response = client.chat.completions.create(
+        model="gpt-4-1106-preview",
+        messages=[
+            {"role": "system", "content": planning_prompt}
+        ],
+        temperature=0.2
+    )
+
+    generated_code = plan_response.choices[0].message.content.strip()
+    if generated_code.startswith("```"):
+        generated_code = generated_code.strip("`\n")
+        if generated_code.startswith("python"):
+            generated_code = generated_code[6:].strip()
+
+    local_vars = {"df": df, "pd": pd, "np": np}
+
     try:
-        plan_response = client.chat.completions.create(
-            model="gpt-4-1106-preview",
-            messages=[
-                {"role": "system", "content": planning_prompt}
-            ],
-            temperature=0.3
-        )
-
-        generated_code = plan_response.choices[0].message.content.strip()
-
-        if generated_code.startswith("```"):
-            generated_code = generated_code.strip("` ")
-            if generated_code.startswith("python"):
-                generated_code = generated_code[len("python"):].strip()
-
-        local_vars = {"df": df.copy(), "np": np}
+        print("\n📄 Generated Code:\n", generated_code)
         exec(generated_code, {}, local_vars)
+    except Exception as e:
+        return f"❌ Error executing generated code: {e}\n\n📄 Code was:\n{generated_code}"
 
-        result = local_vars.get("result")
-        if result is None:
-            return "❌ No result was returned by the code."
+    result_keys = [k for k in local_vars if not k.startswith("__") and k != "df"]
+    if not result_keys:
+        return "✅ Code executed, but no result objects were defined."
 
+    try:
         explanation_prompt = f"""
 You are a helpful data analyst. The user asked:
 "{question}"
 
 Here is the result of your analysis:
-{str(result)[:2000]}
+{str({k: local_vars[k] for k in result_keys})}
 
-Write a clear, concise answer for the user based on this result.
+Please explain your findings in a short, clear, and professional way.
 """
 
-        explain_response = client.chat.completions.create(
+        summary = client.chat.completions.create(
             model="gpt-4-1106-preview",
-            messages=[
-                {"role": "system", "content": explanation_prompt}
-            ],
-            temperature=0.3
+            messages=[{"role": "system", "content": explanation_prompt}],
+            temperature=0.4
         )
-
-        return f"**Answer:** {explain_response.choices[0].message.content.strip()}"
+        return f"**Answer:** {summary.choices[0].message.content.strip()}"
 
     except Exception as e:
-        return f"❌ Error: {e}"
+        return f"✅ Executed code but failed to summarize: {e}\n\n{str({k: local_vars[k] for k in result_keys})}"
