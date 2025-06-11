@@ -86,7 +86,7 @@ Please return a Python code block that:
 
     try:
         explanation_prompt = f"""
-You are a helpful data analyst. The user asked:
+You are a helpful digital marketing data analyst. The user asked:
 "{question}"
 
 Here is the result of your analysis:
