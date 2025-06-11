@@ -1,16 +1,21 @@
 import streamlit as st
 from bot_backend import analyze_question
 
-import streamlit as st
-#st.write("✅ Secrets loaded:", "OPENAI_API_KEY" in st.secrets)
+# Map of community names to Google Sheet URLs
+COMMUNITY_SHEETS = {
+    "Maplewood": "https://docs.google.com/spreadsheets/d/1zqONqW7dkKMhjT3VBWMYklar4EzE4PpCG38H9nqqhMc/edit?gid=0#gid=0",
+    "Kingswood": "https://docs.google.com/spreadsheets/d/your-oakridge-sheet-id",
+    "Duncaster": "https://docs.google.com/spreadsheets/d/your-pinehill-sheet-id",
+}
 
-st.title("Looker Chatbot!")
+st.title("📊 Campaign Performance Bot")
 
-sheet_url = st.text_input("Paste the Google Sheet URL:")
-question = st.text_area("Ask a question about this community:")
+community = st.selectbox("Select a community", list(COMMUNITY_SHEETS.keys()))
+question = st.text_input("Ask a question about the campaign data:")
 
-if st.button("Ask") and sheet_url and question:
+if st.button("Ask") and question:
+    sheet_url = COMMUNITY_SHEETS[community]
     with st.spinner("Thinking..."):
         response = analyze_question(question, sheet_url)
-        st.markdown(f"**Answer:** {response}")
-# trigger redeploy
+    st.markdown(response)
+
