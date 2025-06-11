@@ -100,7 +100,7 @@ Please explain your findings in a short, clear, and professional way.
             messages=[{"role": "system", "content": explanation_prompt}],
             temperature=0.4
         )
-        return f"**Answer:** {summary.choices[0].message.content.strip()}"
+        return f" {summary.choices[0].message.content.strip()}"
 
     except Exception as e:
         return f"✅ Executed code but failed to summarize: {e}\n\n{str({k: local_vars[k] for k in result_keys})}"
